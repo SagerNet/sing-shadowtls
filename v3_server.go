@@ -2,8 +2,10 @@ package shadowtls
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/binary"
 	"hash"
 	"io"
@@ -32,26 +34,42 @@ func extractFrame(conn net.Conn) (*buf.Buffer, error) {
 	return buffer, err
 }
 
-func verifyClientHello(frame []byte, password string) error {
+func extractServerName(frame []byte) (string, error) {
+	var hello *tls.ClientHelloInfo
+	err := tls.Server(bufio.NewReadOnlyConn(bytes.NewReader(frame)), &tls.Config{
+		GetConfigForClient: func(argHello *tls.ClientHelloInfo) (*tls.Config, error) {
+			hello = argHello
+			return nil, nil
+		},
+	}).HandshakeContext(context.Background())
+	if hello != nil {
+		return hello.ServerName, nil
+	}
+	return "", err
+}
+
+func verifyClientHello(frame []byte, users []User) (*User, error) {
 	const minLen = tlsHeaderSize + 1 + 3 + 2 + tlsRandomSize + 1 + tlsSessionIDSize
 	const hmacIndex = sessionIDLengthIndex + 1 + tlsSessionIDSize - hmacSize
 	if len(frame) < minLen {
-		return io.ErrUnexpectedEOF
+		return nil, io.ErrUnexpectedEOF
 	} else if frame[0] != handshake {
-		return E.New("unexpected record type")
+		return nil, E.New("unexpected record type")
 	} else if frame[5] != clientHello {
-		return E.New("unexpected handshake type")
+		return nil, E.New("unexpected handshake type")
 	} else if frame[sessionIDLengthIndex] != tlsSessionIDSize {
-		return E.New("unexpected session id length")
+		return nil, E.New("unexpected session id length")
 	}
-	hmacSHA1Hash := hmac.New(sha1.New, []byte(password))
-	hmacSHA1Hash.Write(frame[tlsHeaderSize:hmacIndex])
-	hmacSHA1Hash.Write(rw.ZeroBytes[:4])
-	hmacSHA1Hash.Write(frame[hmacIndex+hmacSize:])
-	if !hmac.Equal(frame[hmacIndex:hmacIndex+hmacSize], hmacSHA1Hash.Sum(nil)[:hmacSize]) {
-		return E.New("hmac mismatch")
+	for _, user := range users {
+		hmacSHA1Hash := hmac.New(sha1.New, []byte(user.Password))
+		hmacSHA1Hash.Write(frame[tlsHeaderSize:hmacIndex])
+		hmacSHA1Hash.Write(rw.ZeroBytes[:4])
+		hmacSHA1Hash.Write(frame[hmacIndex+hmacSize:])
+		if hmac.Equal(frame[hmacIndex:hmacIndex+hmacSize], hmacSHA1Hash.Sum(nil)[:hmacSize]) {
+			return &user, nil
+		}
 	}
-	return nil
+	return nil, E.New("hmac mismatch")
 }
 
 func extractServerRandom(frame []byte) []byte {
