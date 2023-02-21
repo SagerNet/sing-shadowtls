@@ -26,6 +26,7 @@ type ServiceConfig struct {
 	Users                  []User // for protocol version 3
 	Handshake              HandshakeConfig
 	HandshakeForServerName map[string]HandshakeConfig // for protocol version 2/3
+	StrictMode             bool                       // for protocol version 3
 	Handler                Handler
 	Logger                 logger.ContextLogger
 }
@@ -51,6 +52,7 @@ type Service struct {
 	users                  []User
 	handshake              HandshakeConfig
 	handshakeForServerName map[string]HandshakeConfig
+	strictMode             bool
 	handler                Handler
 	logger                 logger.ContextLogger
 }
@@ -62,6 +64,7 @@ func NewService(config ServiceConfig) (*Service, error) {
 		users:                  config.Users,
 		handshake:              config.Handshake,
 		handshakeForServerName: config.HandshakeForServerName,
+		strictMode:             config.StrictMode,
 		handler:                config.Handler,
 		logger:                 config.Logger,
 	}
@@ -196,7 +199,7 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, metadata M.M
 			return bufio.CopyConn(ctx, conn, handshakeConn)
 		}
 
-		if !isServerHelloSupportTLS13(serverHelloFrame.Bytes()) {
+		if s.strictMode && !isServerHelloSupportTLS13(serverHelloFrame.Bytes()) {
 			s.logger.WarnContext(ctx, "TLS 1.3 is not supported, will copy bidirectional")
 			return bufio.CopyConn(ctx, conn, handshakeConn)
 		}
