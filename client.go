@@ -66,7 +66,12 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.DialContextConn(ctx, conn)
+	shadowTLSConn, err :=  c.DialContextConn(ctx, conn)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return shadowTLSConn, nil
 }
 
 func (c *Client) DialContextConn(ctx context.Context, conn net.Conn) (net.Conn, error) {
