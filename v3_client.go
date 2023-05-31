@@ -41,6 +41,7 @@ type streamWrapper struct {
 	serverRandom []byte
 	readHMAC     hash.Hash
 	readHMACKey  []byte
+	isTLS13      bool
 	authorized   bool
 }
 
@@ -51,8 +52,8 @@ func newStreamWrapper(conn net.Conn, password string) *streamWrapper {
 	}
 }
 
-func (w *streamWrapper) Authorized() (bool, []byte, hash.Hash) {
-	return w.authorized, w.serverRandom, w.readHMAC
+func (w *streamWrapper) Authorized() (bool, bool, []byte, hash.Hash) {
+	return w.isTLS13, w.authorized, w.serverRandom, w.readHMAC
 }
 
 func (w *streamWrapper) Read(p []byte) (n int, err error) {
@@ -84,6 +85,10 @@ func (w *streamWrapper) Read(p []byte) (n int, err error) {
 			w.readHMAC = hmac.New(sha1.New, []byte(w.password))
 			w.readHMAC.Write(w.serverRandom)
 			w.readHMACKey = kdf(w.password, w.serverRandom)
+			w.isTLS13 = isServerHelloSupportTLS13(buffer[5:])
+			if !w.isTLS13 {
+				w.authorized = true
+			}
 		}
 	case applicationData:
 		w.authorized = false

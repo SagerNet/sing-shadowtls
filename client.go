@@ -20,6 +20,7 @@ type ClientConfig struct {
 	Password     string
 	Server       M.Socksaddr
 	Dialer       N.Dialer
+	StrictMode   bool
 	TLSHandshake TLSHandshakeFunc
 	Logger       logger.ContextLogger
 }
@@ -27,6 +28,7 @@ type ClientConfig struct {
 type Client struct {
 	version      int
 	password     string
+	strictMode   bool
 	server       M.Socksaddr
 	dialer       N.Dialer
 	tlsHandshake TLSHandshakeFunc
@@ -37,6 +39,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 	client := &Client{
 		version:      config.Version,
 		password:     config.Password,
+		strictMode:   config.StrictMode,
 		server:       config.Server,
 		dialer:       config.Dialer,
 		tlsHandshake: config.TLSHandshake,
@@ -103,9 +106,11 @@ func (c *Client) DialContextConn(ctx context.Context, conn net.Conn) (net.Conn, 
 			return nil, err
 		}
 		c.logger.TraceContext(ctx, "handshake success")
-		authorized, serverRandom, readHMAC := stream.Authorized()
-		if !authorized {
-			return nil, E.New("traffic hijacked or TLS1.3 is not supported")
+		isTLS13, authorized, serverRandom, readHMAC := stream.Authorized()
+		if c.strictMode && !isTLS13 {
+			return nil, E.New("TLS1.3 is not supported")
+		} else if !authorized {
+			return nil, E.New("traffic hijacked")
 		}
 		if debug.Enabled {
 			c.logger.TraceContext(ctx, "authorized, server random extracted: ", hex.EncodeToString(serverRandom))
