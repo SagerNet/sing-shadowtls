@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -36,7 +35,7 @@ func (c *shadowConn) Read(p []byte) (n int, err error) {
 		return
 	}
 	var tlsHeader [5]byte
-	_, err = io.ReadFull(c.Conn, common.Dup(tlsHeader[:]))
+	_, err = io.ReadFull(c.Conn, tlsHeader[:])
 	if err != nil {
 		return
 	}
@@ -58,13 +57,11 @@ func (c *shadowConn) Read(p []byte) (n int, err error) {
 
 func (c *shadowConn) Write(p []byte) (n int, err error) {
 	var header [tlsHeaderSize]byte
-	defer common.KeepAlive(header)
 	header[0] = 23
 	for len(p) > 16384 {
 		binary.BigEndian.PutUint16(header[1:3], tls.VersionTLS12)
 		binary.BigEndian.PutUint16(header[3:5], uint16(16384))
-		_, err = bufio.WriteVectorised(c.writer, [][]byte{common.Dup(header[:]), p[:16384]})
-		common.KeepAlive(header)
+		_, err = bufio.WriteVectorised(c.writer, [][]byte{header[:], p[:16384]})
 		if err != nil {
 			return
 		}
@@ -73,7 +70,7 @@ func (c *shadowConn) Write(p []byte) (n int, err error) {
 	}
 	binary.BigEndian.PutUint16(header[1:3], tls.VersionTLS12)
 	binary.BigEndian.PutUint16(header[3:5], uint16(len(p)))
-	_, err = bufio.WriteVectorised(c.writer, [][]byte{common.Dup(header[:]), p})
+	_, err = bufio.WriteVectorised(c.writer, [][]byte{header[:], p})
 	if err == nil {
 		n += len(p)
 	}
@@ -82,7 +79,6 @@ func (c *shadowConn) Write(p []byte) (n int, err error) {
 
 func (c *shadowConn) WriteVectorised(buffers []*buf.Buffer) error {
 	var header [tlsHeaderSize]byte
-	defer common.KeepAlive(header)
 	header[0] = 23
 	dataLen := buf.LenMulti(buffers)
 	binary.BigEndian.PutUint16(header[1:3], tls.VersionTLS12)

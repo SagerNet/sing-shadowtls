@@ -123,7 +123,7 @@ func (c *verifiedConn) write(p []byte) (n int, err error) {
 	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
 	c.hmacAdd.Write(hmacHash)
 	copy(header[tlsHeaderSize:], hmacHash)
-	_, err = bufio.WriteVectorised(c.vectorisedWriter, [][]byte{common.Dup(header[:]), p})
+	_, err = bufio.WriteVectorised(c.vectorisedWriter, [][]byte{header[:], p})
 	if err == nil {
 		n = len(p)
 	}
