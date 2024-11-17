@@ -15,7 +15,6 @@ import (
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
-	"github.com/sagernet/sing/common/rw"
 )
 
 func extractFrame(conn net.Conn) (*buf.Buffer, error) {
@@ -63,7 +62,7 @@ func verifyClientHello(frame []byte, users []User) (*User, error) {
 	for _, user := range users {
 		hmacSHA1Hash := hmac.New(sha1.New, []byte(user.Password))
 		hmacSHA1Hash.Write(frame[tlsHeaderSize:hmacIndex])
-		hmacSHA1Hash.Write(rw.ZeroBytes[:4])
+		hmacSHA1Hash.Write([]byte{0, 0, 0, 0})
 		hmacSHA1Hash.Write(frame[hmacIndex+hmacSize:])
 		if hmac.Equal(frame[hmacIndex:hmacIndex+hmacSize], hmacSHA1Hash.Sum(nil)[:hmacSize]) {
 			return &user, nil
