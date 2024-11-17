@@ -115,18 +115,6 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, *keySharePrivateKeys, *echCon
 		return nil, nil, nil, errors.New("tls: short read from Rand: " + err.Error())
 	}
 
-	// A random session ID is used to detect when the server accepted a ticket
-	// and is resuming a session (see RFC 5077). In TLS 1.3, it's always set as
-	// a compatibility measure (see RFC 8446, Section 4.1.2).
-	//
-	// The session ID is not set for QUIC connections (see RFC 9001, Section 8.4).
-	if c.quic == nil {
-		hello.sessionId = make([]byte, 32)
-		if _, err := io.ReadFull(config.rand(), hello.sessionId); err != nil {
-			return nil, nil, nil, errors.New("tls: short read from Rand: " + err.Error())
-		}
-	}
-
 	if maxVersion >= VersionTLS12 {
 		hello.supportedSignatureAlgorithms = supportedSignatureAlgorithms()
 	}
@@ -232,6 +220,26 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, *keySharePrivateKeys, *echCon
 		ech.encapsulatedKey, ech.hpkeContext, err = hpke.SetupSender(ech.config.KemID, suite.KDFID, suite.AEADID, echPK, info)
 		if err != nil {
 			return nil, nil, nil, err
+		}
+	}
+
+	if c.quic == nil {
+		// A random session ID is used to detect when the server accepted a ticket
+		// and is resuming a session (see RFC 5077). In TLS 1.3, it's always set as
+		// a compatibility measure (see RFC 8446, Section 4.1.2).
+		hello.sessionId = make([]byte, 32)
+		if config.SessionIDGenerator != nil {
+			buffer, err := hello.marshal()
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if err := config.SessionIDGenerator(buffer, hello.sessionId); err != nil {
+				return nil, nil, nil, errors.New("tls: generate session id failed: " + err.Error())
+			}
+		} else {
+			if _, err := io.ReadFull(config.rand(), hello.sessionId); err != nil {
+				return nil, nil, nil, errors.New("tls: short read from Rand: " + err.Error())
+			}
 		}
 	}
 
