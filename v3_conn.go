@@ -7,6 +7,7 @@ import (
 	"hash"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
@@ -19,11 +20,11 @@ type verifiedConn struct {
 	net.Conn
 	writer           N.ExtendedWriter
 	vectorisedWriter N.VectorisedWriter
+	access           sync.Mutex
 	hmacAdd          hash.Hash
 	hmacVerify       hash.Hash
 	hmacIgnore       hash.Hash
-
-	buffer *buf.Buffer
+	buffer           *buf.Buffer
 }
 
 func newVerifiedConn(
@@ -119,9 +120,11 @@ func (c *verifiedConn) write(p []byte) (n int, err error) {
 	header[1] = 3
 	header[2] = 3
 	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(len(p)))
+	c.access.Lock()
 	c.hmacAdd.Write(p)
 	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
 	c.hmacAdd.Write(hmacHash)
+	c.access.Unlock()
 	copy(header[tlsHeaderSize:], hmacHash)
 	_, err = bufio.WriteVectorised(c.vectorisedWriter, [][]byte{header[:], p})
 	if err == nil {
@@ -131,6 +134,7 @@ func (c *verifiedConn) write(p []byte) (n int, err error) {
 }
 
 func (c *verifiedConn) WriteBuffer(buffer *buf.Buffer) error {
+	c.access.Lock()
 	c.hmacAdd.Write(buffer.Bytes())
 	dateLen := buffer.Len()
 	header := buffer.ExtendHeader(tlsHmacHeaderSize)
@@ -140,6 +144,7 @@ func (c *verifiedConn) WriteBuffer(buffer *buf.Buffer) error {
 	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(dateLen))
 	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
 	c.hmacAdd.Write(hmacHash)
+	c.access.Unlock()
 	copy(header[tlsHeaderSize:], hmacHash)
 	return c.writer.WriteBuffer(buffer)
 }
@@ -150,11 +155,14 @@ func (c *verifiedConn) WriteVectorised(buffers []*buf.Buffer) error {
 	header[1] = 3
 	header[2] = 3
 	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(buf.LenMulti(buffers)))
+	c.access.Lock()
 	for _, buffer := range buffers {
 		c.hmacAdd.Write(buffer.Bytes())
 	}
 	c.hmacAdd.Write(c.hmacAdd.Sum(nil)[:hmacSize])
-	copy(header[tlsHeaderSize:], c.hmacAdd.Sum(nil)[:hmacSize])
+	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
+	c.access.Unlock()
+	copy(header[tlsHeaderSize:], hmacHash)
 	return c.vectorisedWriter.WriteVectorised(append([]*buf.Buffer{buf.As(header[:])}, buffers...))
 }
 
