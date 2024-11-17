@@ -20,6 +20,17 @@ import (
 	"github.com/sagernet/sing/common/task"
 )
 
+type Service struct {
+	version                int
+	password               string
+	users                  []User
+	handshake              HandshakeConfig
+	handshakeForServerName map[string]HandshakeConfig
+	strictMode             bool
+	handler                N.TCPConnectionHandlerEx
+	logger                 logger.ContextLogger
+}
+
 type ServiceConfig struct {
 	Version                int
 	Password               string // for protocol version 2
@@ -27,7 +38,7 @@ type ServiceConfig struct {
 	Handshake              HandshakeConfig
 	HandshakeForServerName map[string]HandshakeConfig // for protocol version 2/3
 	StrictMode             bool                       // for protocol version 3
-	Handler                Handler
+	Handler                N.TCPConnectionHandlerEx
 	Logger                 logger.ContextLogger
 }
 
@@ -39,22 +50,6 @@ type User struct {
 type HandshakeConfig struct {
 	Server M.Socksaddr
 	Dialer N.Dialer
-}
-
-type Handler interface {
-	N.TCPConnectionHandler
-	E.Handler
-}
-
-type Service struct {
-	version                int
-	password               string
-	users                  []User
-	handshake              HandshakeConfig
-	handshakeForServerName map[string]HandshakeConfig
-	strictMode             bool
-	handler                Handler
-	logger                 logger.ContextLogger
 }
 
 func NewService(config ServiceConfig) (*Service, error) {
@@ -99,7 +94,7 @@ func (s *Service) selectHandshake(clientHelloFrame *buf.Buffer) HandshakeConfig 
 	return s.handshake
 }
 
-func (s *Service) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
+func (s *Service) NewConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) error {
 	switch s.version {
 	default:
 		fallthrough
@@ -125,7 +120,8 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, metadata M.M
 			return err
 		}
 		s.logger.TraceContext(ctx, "handshake finished")
-		return s.handler.NewConnection(ctx, conn, metadata)
+		s.handler.NewConnectionEx(ctx, conn, source, destination, onClose)
+		return nil
 	case 2:
 		clientHelloFrame, err := extractFrame(conn)
 		if err != nil {
@@ -144,7 +140,8 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, metadata M.M
 		if err == nil {
 			s.logger.TraceContext(ctx, "handshake finished")
 			handshakeConn.Close()
-			return s.handler.NewConnection(ctx, bufio.NewCachedConn(newConn(conn), request), metadata)
+			s.handler.NewConnectionEx(ctx, bufio.NewCachedConn(newConn(conn), request), source, destination, onClose)
+			return nil
 		} else if err == os.ErrPermission {
 			s.logger.WarnContext(ctx, "fallback connection")
 			hashConn.Fallback()
@@ -247,6 +244,7 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, metadata M.M
 			return E.Cause(err, "handshake relay")
 		}
 		s.logger.TraceContext(ctx, "handshake relay finished")
-		return s.handler.NewConnection(ctx, bufio.NewCachedConn(newVerifiedConn(conn, hmacAdd, hmacVerify, nil), clientFirstFrame), metadata)
+		s.handler.NewConnectionEx(ctx, bufio.NewCachedConn(newVerifiedConn(conn, hmacAdd, hmacVerify, nil), clientFirstFrame), source, destination, onClose)
+		return nil
 	}
 }
