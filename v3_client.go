@@ -85,7 +85,7 @@ func (w *streamWrapper) Read(p []byte) (n int, err error) {
 			w.readHMAC = hmac.New(sha1.New, []byte(w.password))
 			w.readHMAC.Write(w.serverRandom)
 			w.readHMACKey = kdf(w.password, w.serverRandom)
-			w.isTLS13 = isServerHelloSupportTLS13(buffer[5:])
+			w.isTLS13 = isServerHelloSupportTLS13(buffer)
 			if !w.isTLS13 {
 				w.authorized = true
 			}
