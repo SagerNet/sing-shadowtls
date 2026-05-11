@@ -110,7 +110,10 @@ func isServerHelloSupportTLS13(frame []byte) bool {
 	if err != nil {
 		return false
 	}
-	for i := uint16(0); i < extensionListLength; i++ {
+	// extensionListLength is the total byte length of all extensions,
+	// NOT the number of extensions. Iterate by bytes consumed.
+	extensionsRead := uint16(0)
+	for extensionsRead < extensionListLength {
 		var extensionType uint16
 		err = binary.Read(reader, binary.BigEndian, &extensionType)
 		if err != nil {
@@ -121,6 +124,7 @@ func isServerHelloSupportTLS13(frame []byte) bool {
 		if err != nil {
 			return false
 		}
+		extensionsRead += 4 + extensionLength
 		if extensionType != 43 {
 			_, err = io.CopyN(io.Discard, reader, int64(extensionLength))
 			if err != nil {
