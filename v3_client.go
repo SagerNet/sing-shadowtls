@@ -79,13 +79,15 @@ func (w *streamWrapper) Read(p []byte) (n int, err error) {
 	buffer := w.buffer.Bytes()
 	switch tlsHeader[0] {
 	case handshake:
-		if len(buffer) > serverRandomIndex+tlsRandomSize && buffer[5] == serverHello {
+		// Mirror service.go's one-shot seed: only init the HMAC chain on the first
+		// ServerHello so a TLS 1.3 HelloRetryRequest (RFC 8446 §4.1.4) aligns both peers.
+		if len(buffer) > serverRandomIndex+tlsRandomSize && buffer[5] == serverHello && w.readHMAC == nil {
 			w.serverRandom = make([]byte, tlsRandomSize)
 			copy(w.serverRandom, buffer[serverRandomIndex:serverRandomIndex+tlsRandomSize])
 			w.readHMAC = hmac.New(sha1.New, []byte(w.password))
 			w.readHMAC.Write(w.serverRandom)
 			w.readHMACKey = kdf(w.password, w.serverRandom)
-			w.isTLS13 = isServerHelloSupportTLS13(buffer[5:])
+			w.isTLS13 = isServerHelloSupportTLS13(buffer)
 			if !w.isTLS13 {
 				w.authorized = true
 			}
@@ -100,6 +102,8 @@ func (w *streamWrapper) Read(p []byte) (n int, err error) {
 				binary.BigEndian.PutUint16(buffer[hmacSize+3:], uint16(len(buffer)-tlsHmacHeaderSize))
 				w.buffer.Advance(hmacSize)
 				w.authorized = true
+			} else {
+				return 0, E.New("shadow-tls v3: hmac mismatch, possible data corruption")
 			}
 		}
 	}
