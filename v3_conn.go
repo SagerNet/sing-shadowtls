@@ -121,10 +121,10 @@ func (c *verifiedConn) write(p []byte) (n int, err error) {
 	header[2] = 3
 	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(len(p)))
 	c.access.Lock()
+	defer c.access.Unlock()
 	c.hmacAdd.Write(p)
 	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
 	c.hmacAdd.Write(hmacHash)
-	c.access.Unlock()
 	copy(header[tlsHeaderSize:], hmacHash)
 	_, err = bufio.WriteVectorised(c.vectorisedWriter, [][]byte{header[:], p})
 	if err == nil {
@@ -135,6 +135,7 @@ func (c *verifiedConn) write(p []byte) (n int, err error) {
 
 func (c *verifiedConn) WriteBuffer(buffer *buf.Buffer) error {
 	c.access.Lock()
+	defer c.access.Unlock()
 	c.hmacAdd.Write(buffer.Bytes())
 	dateLen := buffer.Len()
 	header := buffer.ExtendHeader(tlsHmacHeaderSize)
@@ -144,26 +145,55 @@ func (c *verifiedConn) WriteBuffer(buffer *buf.Buffer) error {
 	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(dateLen))
 	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
 	c.hmacAdd.Write(hmacHash)
-	c.access.Unlock()
 	copy(header[tlsHeaderSize:], hmacHash)
 	return c.writer.WriteBuffer(buffer)
 }
 
 func (c *verifiedConn) WriteVectorised(buffers []*buf.Buffer) error {
+	defer buf.ReleaseMulti(buffers)
+	var payload [][]byte
+	var payloadLength int
+	for _, buffer := range buffers {
+		data := buffer.Bytes()
+		for len(data) > 0 {
+			dataLength := len(data)
+			if remaining := 16384 - payloadLength; dataLength > remaining {
+				dataLength = remaining
+			}
+			payload = append(payload, data[:dataLength])
+			payloadLength += dataLength
+			data = data[dataLength:]
+			if payloadLength == 16384 {
+				if err := c.writeVectorised(payload, payloadLength); err != nil {
+					return err
+				}
+				payload = payload[:0]
+				payloadLength = 0
+			}
+		}
+	}
+	if payloadLength > 0 {
+		return c.writeVectorised(payload, payloadLength)
+	}
+	return nil
+}
+
+func (c *verifiedConn) writeVectorised(payload [][]byte, payloadLength int) error {
 	var header [tlsHmacHeaderSize]byte
 	header[0] = applicationData
 	header[1] = 3
 	header[2] = 3
-	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(buf.LenMulti(buffers)))
+	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(payloadLength))
 	c.access.Lock()
-	for _, buffer := range buffers {
-		c.hmacAdd.Write(buffer.Bytes())
+	defer c.access.Unlock()
+	for _, data := range payload {
+		c.hmacAdd.Write(data)
 	}
-	c.hmacAdd.Write(c.hmacAdd.Sum(nil)[:hmacSize])
 	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
-	c.access.Unlock()
+	c.hmacAdd.Write(hmacHash)
 	copy(header[tlsHeaderSize:], hmacHash)
-	return c.vectorisedWriter.WriteVectorised(append([]*buf.Buffer{buf.As(header[:])}, buffers...))
+	_, err := bufio.WriteVectorised(c.vectorisedWriter, append([][]byte{header[:]}, payload...))
+	return err
 }
 
 func (c *verifiedConn) FrontHeadroom() int {
