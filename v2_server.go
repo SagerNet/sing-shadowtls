@@ -28,13 +28,13 @@ func copyUntilHandshakeFinishedV2(ctx context.Context, logger logger.ContextLogg
 				data.Release()
 				return nil, err
 			}
-			if hash.HasContent() && length >= 8 {
-				checksum := hash.Sum()
+			checksum, lastChecksum, hasContent := hash.Sums()
+			if hasContent && length >= 8 {
 				if bytes.Equal(data.To(8), checksum) {
 					logger.TraceContext(ctx, "match current hashcode")
 					data.Advance(8)
 					return data, nil
-				} else if hash.LastSum() != nil && bytes.Equal(data.To(8), hash.LastSum()) {
+				} else if lastChecksum != nil && bytes.Equal(data.To(8), lastChecksum) {
 					logger.TraceContext(ctx, "match last hashcode")
 					data.Advance(8)
 					return data, nil
