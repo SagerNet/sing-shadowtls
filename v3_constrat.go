@@ -5,6 +5,8 @@ const (
 	tlsHeaderSize    = 5
 	tlsSessionIDSize = 32
 
+	tlsMaxPlaintextSize = 16384
+
 	clientHello = 1
 	serverHello = 2
 

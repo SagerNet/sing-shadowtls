@@ -96,37 +96,7 @@ func (c *verifiedConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *verifiedConn) Write(p []byte) (n int, err error) {
-	pTotal := len(p)
-	for len(p) > 0 {
-		var pWrite []byte
-		if len(p) > 16384 {
-			pWrite = p[:16384]
-			p = p[16384:]
-		} else {
-			pWrite = p
-			p = nil
-		}
-		_, err = c.write(pWrite)
-	}
-	if err == nil {
-		n = pTotal
-	}
-	return
-}
-
-func (c *verifiedConn) write(p []byte) (n int, err error) {
-	var header [tlsHmacHeaderSize]byte
-	header[0] = applicationData
-	header[1] = 3
-	header[2] = 3
-	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(len(p)))
-	c.access.Lock()
-	c.hmacAdd.Write(p)
-	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
-	c.hmacAdd.Write(hmacHash)
-	c.access.Unlock()
-	copy(header[tlsHeaderSize:], hmacHash)
-	_, err = bufio.WriteVectorised(c.vectorisedWriter, [][]byte{header[:], p})
+	err = c.WriteVectorised([]*buf.Buffer{buf.As(p)})
 	if err == nil {
 		n = len(p)
 	}
@@ -134,40 +104,46 @@ func (c *verifiedConn) write(p []byte) (n int, err error) {
 }
 
 func (c *verifiedConn) WriteBuffer(buffer *buf.Buffer) error {
+	if buffer.Len() > tlsMaxPlaintextSize {
+		return c.WriteVectorised([]*buf.Buffer{buffer})
+	}
 	c.access.Lock()
-	c.hmacAdd.Write(buffer.Bytes())
-	dateLen := buffer.Len()
-	header := buffer.ExtendHeader(tlsHmacHeaderSize)
-	header[0] = applicationData
-	header[1] = 3
-	header[2] = 3
-	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(dateLen))
-	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
-	c.hmacAdd.Write(hmacHash)
-	c.access.Unlock()
-	copy(header[tlsHeaderSize:], hmacHash)
+	defer c.access.Unlock()
+	payload := buffer.Bytes()
+	c.putHeaderLocked(buffer.ExtendHeader(tlsHmacHeaderSize), len(payload), [][]byte{payload})
 	return c.writer.WriteBuffer(buffer)
 }
 
 func (c *verifiedConn) WriteVectorised(buffers []*buf.Buffer) error {
-	var header [tlsHmacHeaderSize]byte
+	defer buf.ReleaseMulti(buffers)
+	c.access.Lock()
+	defer c.access.Unlock()
+	records := splitRecords(buffers, tlsHmacHeaderSize, c.putHeaderLocked)
+	if len(records) == 0 {
+		return nil
+	}
+	return common.Error(bufio.WriteVectorised(c.vectorisedWriter, records))
+}
+
+func (c *verifiedConn) putHeaderLocked(header []byte, payloadLen int, payload [][]byte) {
 	header[0] = applicationData
 	header[1] = 3
 	header[2] = 3
-	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], hmacSize+uint16(buf.LenMulti(buffers)))
-	c.access.Lock()
-	for _, buffer := range buffers {
-		c.hmacAdd.Write(buffer.Bytes())
+	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], uint16(hmacSize+payloadLen))
+	for _, segment := range payload {
+		c.hmacAdd.Write(segment)
 	}
-	c.hmacAdd.Write(c.hmacAdd.Sum(nil)[:hmacSize])
 	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
-	c.access.Unlock()
+	c.hmacAdd.Write(hmacHash)
 	copy(header[tlsHeaderSize:], hmacHash)
-	return c.vectorisedWriter.WriteVectorised(append([]*buf.Buffer{buf.As(header[:])}, buffers...))
 }
 
 func (c *verifiedConn) FrontHeadroom() int {
 	return tlsHmacHeaderSize
+}
+
+func (c *verifiedConn) WriterMTU() int {
+	return tlsMaxPlaintextSize
 }
 
 func (c *verifiedConn) NeedAdditionalReadDeadline() bool {
@@ -190,6 +166,43 @@ func verifyApplicationData(frame []byte, hmac hash.Hash, update bool) bool {
 	return bytes.Equal(frame[tlsHeaderSize:tlsHeaderSize+hmacSize], hmacHash)
 }
 
+func splitRecords(buffers []*buf.Buffer, headerSize int, putHeader func(header []byte, payloadLen int, payload [][]byte)) [][]byte {
+	totalLen := buf.LenMulti(buffers)
+	if totalLen == 0 {
+		return nil
+	}
+	headers := make([]byte, (totalLen+tlsMaxPlaintextSize-1)/tlsMaxPlaintextSize*headerSize)
+	var (
+		records     [][]byte
+		recordIndex int
+		recordLen   int
+	)
+	for _, buffer := range buffers {
+		for data := buffer.Bytes(); len(data) > 0; {
+			if recordLen == 0 {
+				recordIndex = len(records)
+				records = append(records, headers[:headerSize])
+				headers = headers[headerSize:]
+			}
+			segment := data
+			if len(segment) > tlsMaxPlaintextSize-recordLen {
+				segment = segment[:tlsMaxPlaintextSize-recordLen]
+			}
+			data = data[len(segment):]
+			records = append(records, segment)
+			recordLen += len(segment)
+			if recordLen == tlsMaxPlaintextSize {
+				putHeader(records[recordIndex], recordLen, records[recordIndex+1:])
+				recordLen = 0
+			}
+		}
+	}
+	if recordLen > 0 {
+		putHeader(records[recordIndex], recordLen, records[recordIndex+1:])
+	}
+	return records
+}
+
 func sendAlert(writer io.Writer) {
 	const recordSize = 31
 	record := [recordSize]byte{
@@ -205,3 +218,11 @@ func sendAlert(writer io.Writer) {
 	}
 	writer.Write(record[:])
 }
+
+var (
+	_ N.ExtendedWriter    = (*verifiedConn)(nil)
+	_ N.VectorisedWriter  = (*verifiedConn)(nil)
+	_ N.FrontHeadroom     = (*verifiedConn)(nil)
+	_ N.WriterWithMTU     = (*verifiedConn)(nil)
+	_ common.WithUpstream = (*verifiedConn)(nil)
+)

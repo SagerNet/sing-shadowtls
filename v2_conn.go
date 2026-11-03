@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 
+	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -56,34 +57,28 @@ func (c *shadowConn) Read(p []byte) (n int, err error) {
 }
 
 func (c *shadowConn) Write(p []byte) (n int, err error) {
-	var header [tlsHeaderSize]byte
-	header[0] = 23
-	for len(p) > 16384 {
-		binary.BigEndian.PutUint16(header[1:3], tls.VersionTLS12)
-		binary.BigEndian.PutUint16(header[3:5], uint16(16384))
-		_, err = bufio.WriteVectorised(c.writer, [][]byte{header[:], p[:16384]})
-		if err != nil {
-			return
-		}
-		n += 16384
-		p = p[16384:]
-	}
-	binary.BigEndian.PutUint16(header[1:3], tls.VersionTLS12)
-	binary.BigEndian.PutUint16(header[3:5], uint16(len(p)))
-	_, err = bufio.WriteVectorised(c.writer, [][]byte{header[:], p})
+	err = c.WriteVectorised([]*buf.Buffer{buf.As(p)})
 	if err == nil {
-		n += len(p)
+		n = len(p)
 	}
 	return
 }
 
 func (c *shadowConn) WriteVectorised(buffers []*buf.Buffer) error {
-	var header [tlsHeaderSize]byte
-	header[0] = 23
-	dataLen := buf.LenMulti(buffers)
-	binary.BigEndian.PutUint16(header[1:3], tls.VersionTLS12)
-	binary.BigEndian.PutUint16(header[3:5], uint16(dataLen))
-	return c.writer.WriteVectorised(append([]*buf.Buffer{buf.As(header[:])}, buffers...))
+	defer buf.ReleaseMulti(buffers)
+	records := splitRecords(buffers, tlsHeaderSize, func(header []byte, payloadLen int, _ [][]byte) {
+		header[0] = applicationData
+		binary.BigEndian.PutUint16(header[1:3], tls.VersionTLS12)
+		binary.BigEndian.PutUint16(header[3:5], uint16(payloadLen))
+	})
+	if len(records) == 0 {
+		return nil
+	}
+	return common.Error(bufio.WriteVectorised(c.writer, records))
+}
+
+func (c *shadowConn) WriterMTU() int {
+	return tlsMaxPlaintextSize
 }
 
 func (c *shadowConn) NeedAdditionalReadDeadline() bool {
@@ -93,3 +88,9 @@ func (c *shadowConn) NeedAdditionalReadDeadline() bool {
 func (c *shadowConn) Upstream() any {
 	return c.Conn
 }
+
+var (
+	_ N.VectorisedWriter  = (*shadowConn)(nil)
+	_ N.WriterWithMTU     = (*shadowConn)(nil)
+	_ common.WithUpstream = (*shadowConn)(nil)
+)
