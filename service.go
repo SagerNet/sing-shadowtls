@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"net"
 	"os"
+	"sync/atomic"
 
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/auth"
@@ -257,28 +258,33 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, source M.Soc
 
 		var clientFirstFrame *buf.Buffer
 		var group task.Group
-		var handshakeFinished bool
+		var handshakeFinished atomic.Bool
 		group.Append("client handshake relay", func(ctx context.Context) error {
 			clientFrame, cErr := copyByFrameUntilHMACMatches(conn, handshakeConn, hmacVerify, hmacVerifyReset)
 			if cErr == nil {
 				clientFirstFrame = clientFrame
-				handshakeFinished = true
+				handshakeFinished.Store(true)
 				handshakeConn.Close()
 			}
 			return cErr
 		})
 		group.Append("server handshake relay", func(ctx context.Context) error {
 			cErr := copyByFrameWithModification(handshakeConn, conn, user.Password, serverRandom, hmacWrite)
-			if E.IsClosedOrCanceled(cErr) && handshakeFinished {
+			if E.IsClosedOrCanceled(cErr) && handshakeFinished.Load() {
 				return nil
 			}
 			return cErr
 		})
+		group.FastFail()
 		group.Cleanup(func() {
 			handshakeConn.Close()
+			if !handshakeFinished.Load() {
+				conn.Close()
+			}
 		})
 		err = group.Run(ctx)
 		if err != nil {
+			clientFirstFrame.Release()
 			return E.Cause(err, "handshake relay")
 		}
 		s.logger.TraceContext(ctx, "handshake relay finished")
