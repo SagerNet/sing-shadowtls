@@ -79,17 +79,15 @@ func (w *streamWrapper) Read(p []byte) (n int, err error) {
 	buffer := w.buffer.Bytes()
 	switch tlsHeader[0] {
 	case handshake:
-		// Mirror service.go's one-shot seed: only init the HMAC chain on the first
-		// ServerHello so a TLS 1.3 HelloRetryRequest (RFC 8446 §4.1.4) aligns both peers.
-		if len(buffer) > serverRandomIndex+tlsRandomSize && buffer[5] == serverHello && w.readHMAC == nil {
-			w.serverRandom = make([]byte, tlsRandomSize)
-			copy(w.serverRandom, buffer[serverRandomIndex:serverRandomIndex+tlsRandomSize])
-			w.readHMAC = hmac.New(sha1.New, []byte(w.password))
-			w.readHMAC.Write(w.serverRandom)
-			w.readHMACKey = kdf(w.password, w.serverRandom)
-			w.isTLS13 = isServerHelloSupportTLS13(buffer)
-			if !w.isTLS13 {
-				w.authorized = true
+		if w.readHMAC == nil {
+			w.serverRandom, w.isTLS13 = parseServerHello(buffer)
+			if w.serverRandom != nil {
+				w.readHMAC = hmac.New(sha1.New, []byte(w.password))
+				w.readHMAC.Write(w.serverRandom)
+				w.readHMACKey = kdf(w.password, w.serverRandom)
+				if !w.isTLS13 {
+					w.authorized = true
+				}
 			}
 		}
 	case applicationData:

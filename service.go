@@ -227,19 +227,19 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, source M.Soc
 			return E.Cause(err, "write server handshake")
 		}
 
-		serverRandom := extractServerRandom(serverHelloFrame.Bytes())
+		serverRandom, supportTLS13 := parseServerHello(serverHelloFrame.Bytes())
+		serverHelloFrame.Release()
 
 		if serverRandom == nil {
 			s.logger.WarnContext(ctx, "server random extract failed, will copy bidirectional")
 			return bufio.CopyConn(ctx, conn, handshakeConn)
 		}
 
-		if s.strictMode && !isServerHelloSupportTLS13(serverHelloFrame.Bytes()) {
+		if s.strictMode && !supportTLS13 {
 			s.logger.WarnContext(ctx, "TLS 1.3 is not supported, will copy bidirectional")
 			return bufio.CopyConn(ctx, conn, handshakeConn)
 		}
 
-		serverHelloFrame.Release()
 		if debug.Enabled {
 			s.logger.TraceContext(ctx, "client authenticated. server random extracted: ", hex.EncodeToString(serverRandom))
 		}

@@ -15,6 +15,8 @@ import (
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
+
+	"golang.org/x/crypto/cryptobyte"
 )
 
 func extractFrame(conn net.Conn) (*buf.Buffer, error) {
@@ -71,74 +73,45 @@ func verifyClientHello(frame []byte, users []User) (*User, error) {
 	return nil, E.New("hmac mismatch")
 }
 
-func extractServerRandom(frame []byte) []byte {
-	const minLen = tlsHeaderSize + 1 + 3 + 2 + tlsRandomSize
-
-	if len(frame) < minLen || frame[0] != handshake || frame[5] != serverHello {
-		return nil
+func parseServerHello(frame []byte) (serverRandom []byte, supportTLS13 bool) {
+	var (
+		input         = cryptobyte.String(frame)
+		recordType    uint8
+		record        cryptobyte.String
+		messageType   uint8
+		messageLength uint32
+		sessionID     cryptobyte.String
+		extensions    cryptobyte.String
+	)
+	if !input.ReadUint8(&recordType) || recordType != handshake ||
+		!input.Skip(2) || !input.ReadUint16LengthPrefixed(&record) ||
+		!record.ReadUint8(&messageType) || messageType != serverHello ||
+		!record.ReadUint24(&messageLength) {
+		return nil, false
 	}
-
-	serverRandom := make([]byte, tlsRandomSize)
-	copy(serverRandom, frame[serverRandomIndex:serverRandomIndex+tlsRandomSize])
-	return serverRandom
-}
-
-func isServerHelloSupportTLS13(frame []byte) bool {
-	if len(frame) < sessionIDLengthIndex {
-		return false
+	message := record[:min(len(record), int(messageLength))]
+	serverRandom = make([]byte, tlsRandomSize)
+	if !message.Skip(2) || !message.CopyBytes(serverRandom) {
+		return nil, false
 	}
-
-	reader := bytes.NewReader(frame[sessionIDLengthIndex:])
-
-	var sessionIdLength uint8
-	err := binary.Read(reader, binary.BigEndian, &sessionIdLength)
-	if err != nil {
-		return false
+	if !message.ReadUint8LengthPrefixed(&sessionID) || !message.Skip(3) || !message.ReadUint16LengthPrefixed(&extensions) {
+		return
 	}
-	_, err = io.CopyN(io.Discard, reader, int64(sessionIdLength))
-	if err != nil {
-		return false
-	}
-
-	_, err = io.CopyN(io.Discard, reader, 3)
-	if err != nil {
-		return false
-	}
-
-	var extensionListLength uint16
-	err = binary.Read(reader, binary.BigEndian, &extensionListLength)
-	if err != nil {
-		return false
-	}
-	for i := uint16(0); i < extensionListLength; i++ {
-		var extensionType uint16
-		err = binary.Read(reader, binary.BigEndian, &extensionType)
-		if err != nil {
-			return false
+	for !extensions.Empty() {
+		var (
+			extensionType uint16
+			extensionData cryptobyte.String
+		)
+		if !extensions.ReadUint16(&extensionType) || !extensions.ReadUint16LengthPrefixed(&extensionData) {
+			return
 		}
-		var extensionLength uint16
-		err = binary.Read(reader, binary.BigEndian, &extensionLength)
-		if err != nil {
-			return false
+		if extensionType == extensionSupportedVersions {
+			var selectedVersion uint16
+			supportTLS13 = extensionData.ReadUint16(&selectedVersion) && extensionData.Empty() && selectedVersion == tls.VersionTLS13
+			return
 		}
-		if extensionType != 43 {
-			_, err = io.CopyN(io.Discard, reader, int64(extensionLength))
-			if err != nil {
-				return false
-			}
-			continue
-		}
-		if extensionLength != 2 {
-			return false
-		}
-		var extensionValue uint16
-		err = binary.Read(reader, binary.BigEndian, &extensionValue)
-		if err != nil {
-			return false
-		}
-		return extensionValue == 0x0304
 	}
-	return false
+	return
 }
 
 func copyByFrameUntilHMACMatches(conn net.Conn, handshakeConn net.Conn, hmacVerify hash.Hash, hmacReset func()) (*buf.Buffer, error) {
