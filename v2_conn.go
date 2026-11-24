@@ -15,14 +15,16 @@ import (
 
 type shadowConn struct {
 	net.Conn
-	writer        N.VectorisedWriter
-	readRemaining int
+	writer           N.ExtendedWriter
+	vectorisedWriter N.VectorisedWriter
+	readRemaining    int
 }
 
 func newConn(conn net.Conn) *shadowConn {
 	return &shadowConn{
-		Conn:   conn,
-		writer: bufio.NewVectorisedWriter(conn),
+		Conn:             conn,
+		writer:           bufio.NewExtendedWriter(conn),
+		vectorisedWriter: bufio.NewVectorisedWriter(conn),
 	}
 }
 
@@ -57,24 +59,58 @@ func (c *shadowConn) Read(p []byte) (n int, err error) {
 }
 
 func (c *shadowConn) Write(p []byte) (n int, err error) {
-	err = c.WriteVectorised([]*buf.Buffer{buf.As(p)})
+	err = c.WriteBuffer(buf.As(p))
 	if err == nil {
 		n = len(p)
 	}
 	return
 }
 
+func (c *shadowConn) WriteBuffer(buffer *buf.Buffer) error {
+	if buffer.IsEmpty() || buffer.Len() > tlsMaxPlaintextSize {
+		return c.writeRecords([]*buf.Buffer{buffer})
+	}
+	buffer = ensureHeadroom(buffer, tlsHeaderSize+N.CalculateFrontHeadroom(c.Conn), N.CalculateRearHeadroom(c.Conn))
+	payload := buffer.Bytes()
+	putRecordHeader(buffer.ExtendHeader(tlsHeaderSize), payload)
+	return c.writer.WriteBuffer(buffer)
+}
+
+func ensureHeadroom(buffer *buf.Buffer, frontHeadroom int, rearHeadroom int) *buf.Buffer {
+	if buffer.Start() >= frontHeadroom && buffer.FreeLen() >= rearHeadroom {
+		return buffer
+	}
+	copyBuffer := buf.NewSize(frontHeadroom + buffer.Len() + rearHeadroom)
+	copyBuffer.Resize(frontHeadroom, 0)
+	common.Must1(copyBuffer.Write(buffer.Bytes()))
+	buffer.Release()
+	return copyBuffer
+}
+
 func (c *shadowConn) WriteVectorised(buffers []*buf.Buffer) error {
+	if len(buffers) == 1 {
+		return c.WriteBuffer(buffers[0])
+	}
+	return c.writeRecords(buffers)
+}
+
+func (c *shadowConn) writeRecords(buffers []*buf.Buffer) error {
 	defer buf.ReleaseMulti(buffers)
-	records := splitRecords(buffers, tlsHeaderSize, func(header []byte, payloadLen int, _ [][]byte) {
-		header[0] = applicationData
-		binary.BigEndian.PutUint16(header[1:3], tls.VersionTLS12)
-		binary.BigEndian.PutUint16(header[3:5], uint16(payloadLen))
-	})
+	records := newRecords(buffers, tlsHeaderSize, N.CalculateFrontHeadroom(c.Conn), N.CalculateRearHeadroom(c.Conn), putRecordHeader)
 	if len(records) == 0 {
 		return nil
 	}
-	return common.Error(bufio.WriteVectorised(c.writer, records))
+	return c.vectorisedWriter.WriteVectorised(records)
+}
+
+func putRecordHeader(header []byte, payload []byte) {
+	header[0] = applicationData
+	binary.BigEndian.PutUint16(header[1:3], tls.VersionTLS12)
+	binary.BigEndian.PutUint16(header[3:5], uint16(len(payload)))
+}
+
+func (c *shadowConn) FrontHeadroom() int {
+	return tlsHeaderSize
 }
 
 func (c *shadowConn) WriterMTU() int {
@@ -90,7 +126,9 @@ func (c *shadowConn) Upstream() any {
 }
 
 var (
+	_ N.ExtendedWriter    = (*shadowConn)(nil)
 	_ N.VectorisedWriter  = (*shadowConn)(nil)
+	_ N.FrontHeadroom     = (*shadowConn)(nil)
 	_ N.WriterWithMTU     = (*shadowConn)(nil)
 	_ common.WithUpstream = (*shadowConn)(nil)
 )

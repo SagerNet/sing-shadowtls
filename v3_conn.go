@@ -96,7 +96,7 @@ func (c *verifiedConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *verifiedConn) Write(p []byte) (n int, err error) {
-	err = c.WriteVectorised([]*buf.Buffer{buf.As(p)})
+	err = c.WriteBuffer(buf.As(p))
 	if err == nil {
 		n = len(p)
 	}
@@ -104,35 +104,41 @@ func (c *verifiedConn) Write(p []byte) (n int, err error) {
 }
 
 func (c *verifiedConn) WriteBuffer(buffer *buf.Buffer) error {
-	if buffer.Len() > tlsMaxPlaintextSize {
-		return c.WriteVectorised([]*buf.Buffer{buffer})
+	if buffer.IsEmpty() || buffer.Len() > tlsMaxPlaintextSize {
+		return c.writeRecords([]*buf.Buffer{buffer})
 	}
+	buffer = ensureHeadroom(buffer, tlsHmacHeaderSize+N.CalculateFrontHeadroom(c.Conn), N.CalculateRearHeadroom(c.Conn))
 	c.access.Lock()
 	defer c.access.Unlock()
 	payload := buffer.Bytes()
-	c.putHeaderLocked(buffer.ExtendHeader(tlsHmacHeaderSize), len(payload), [][]byte{payload})
+	c.putHeaderLocked(buffer.ExtendHeader(tlsHmacHeaderSize), payload)
 	return c.writer.WriteBuffer(buffer)
 }
 
 func (c *verifiedConn) WriteVectorised(buffers []*buf.Buffer) error {
+	if len(buffers) == 1 {
+		return c.WriteBuffer(buffers[0])
+	}
+	return c.writeRecords(buffers)
+}
+
+func (c *verifiedConn) writeRecords(buffers []*buf.Buffer) error {
 	defer buf.ReleaseMulti(buffers)
 	c.access.Lock()
 	defer c.access.Unlock()
-	records := splitRecords(buffers, tlsHmacHeaderSize, c.putHeaderLocked)
+	records := newRecords(buffers, tlsHmacHeaderSize, N.CalculateFrontHeadroom(c.Conn), N.CalculateRearHeadroom(c.Conn), c.putHeaderLocked)
 	if len(records) == 0 {
 		return nil
 	}
-	return common.Error(bufio.WriteVectorised(c.vectorisedWriter, records))
+	return c.vectorisedWriter.WriteVectorised(records)
 }
 
-func (c *verifiedConn) putHeaderLocked(header []byte, payloadLen int, payload [][]byte) {
+func (c *verifiedConn) putHeaderLocked(header []byte, payload []byte) {
 	header[0] = applicationData
 	header[1] = 3
 	header[2] = 3
-	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], uint16(hmacSize+payloadLen))
-	for _, segment := range payload {
-		c.hmacAdd.Write(segment)
-	}
+	binary.BigEndian.PutUint16(header[3:tlsHeaderSize], uint16(hmacSize+len(payload)))
+	c.hmacAdd.Write(payload)
 	hmacHash := c.hmacAdd.Sum(nil)[:hmacSize]
 	c.hmacAdd.Write(hmacHash)
 	copy(header[tlsHeaderSize:], hmacHash)
@@ -166,39 +172,32 @@ func verifyApplicationData(frame []byte, hmac hash.Hash, update bool) bool {
 	return bytes.Equal(frame[tlsHeaderSize:tlsHeaderSize+hmacSize], hmacHash)
 }
 
-func splitRecords(buffers []*buf.Buffer, headerSize int, putHeader func(header []byte, payloadLen int, payload [][]byte)) [][]byte {
-	totalLen := buf.LenMulti(buffers)
-	if totalLen == 0 {
-		return nil
-	}
-	headers := make([]byte, (totalLen+tlsMaxPlaintextSize-1)/tlsMaxPlaintextSize*headerSize)
-	var (
-		records     [][]byte
-		recordIndex int
-		recordLen   int
-	)
+func newRecords(buffers []*buf.Buffer, headerSize int, frontHeadroom int, rearHeadroom int, putHeader func(header []byte, payload []byte)) []*buf.Buffer {
+	remaining := buf.LenMulti(buffers)
+	records := make([]*buf.Buffer, 0, (remaining+tlsMaxPlaintextSize-1)/tlsMaxPlaintextSize)
+	var record *buf.Buffer
 	for _, buffer := range buffers {
-		for data := buffer.Bytes(); len(data) > 0; {
-			if recordLen == 0 {
-				recordIndex = len(records)
-				records = append(records, headers[:headerSize])
-				headers = headers[headerSize:]
+		data := buffer.Bytes()
+		for len(data) > 0 {
+			if record == nil {
+				recordLen := remaining
+				if recordLen > tlsMaxPlaintextSize {
+					recordLen = tlsMaxPlaintextSize
+				}
+				remaining -= recordLen
+				record = buf.NewSize(frontHeadroom + headerSize + recordLen + rearHeadroom)
+				record.Resize(frontHeadroom+headerSize, 0)
+				record.Reserve(rearHeadroom)
 			}
-			segment := data
-			if len(segment) > tlsMaxPlaintextSize-recordLen {
-				segment = segment[:tlsMaxPlaintextSize-recordLen]
-			}
-			data = data[len(segment):]
-			records = append(records, segment)
-			recordLen += len(segment)
-			if recordLen == tlsMaxPlaintextSize {
-				putHeader(records[recordIndex], recordLen, records[recordIndex+1:])
-				recordLen = 0
+			data = data[common.Must1(record.Write(data)):]
+			if record.IsFull() {
+				record.OverCap(rearHeadroom)
+				payload := record.Bytes()
+				putHeader(record.ExtendHeader(headerSize), payload)
+				records = append(records, record)
+				record = nil
 			}
 		}
-	}
-	if recordLen > 0 {
-		putHeader(records[recordIndex], recordLen, records[recordIndex+1:])
 	}
 	return records
 }
