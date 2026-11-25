@@ -15,6 +15,7 @@ import (
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
+	N "github.com/sagernet/sing/common/network"
 
 	"golang.org/x/crypto/cryptobyte"
 )
@@ -143,7 +144,9 @@ func copyByFrameUntilHMACMatches(conn net.Conn, handshakeConn net.Conn, hmacVeri
 
 func copyByFrameWithModification(conn net.Conn, handshakeConn net.Conn, password string, serverRandom []byte, hmacWrite hash.Hash) error {
 	writeKey := kdf(password, serverRandom)
-	writer := bufio.NewVectorisedWriter(handshakeConn)
+	writer := bufio.NewExtendedWriter(handshakeConn)
+	frontHeadroom := N.CalculateFrontHeadroom(handshakeConn)
+	rearHeadroom := N.CalculateRearHeadroom(handshakeConn)
 	for {
 		frameBuffer, err := extractFrame(conn)
 		if err != nil {
@@ -154,9 +157,13 @@ func copyByFrameWithModification(conn net.Conn, handshakeConn net.Conn, password
 			xorSlice(frame[tlsHeaderSize:], writeKey)
 			hmacWrite.Write(frame[tlsHeaderSize:])
 			binary.BigEndian.PutUint16(frame[3:], uint16(len(frame)-tlsHeaderSize+hmacSize))
-			hmacHash := hmacWrite.Sum(nil)[:4]
-			_, err = bufio.WriteVectorised(writer, [][]byte{frame[:tlsHeaderSize], hmacHash, frame[tlsHeaderSize:]})
+			record := buf.NewSize(frontHeadroom + len(frame) + hmacSize + rearHeadroom)
+			record.Resize(frontHeadroom, 0)
+			common.Must1(record.Write(frame[:tlsHeaderSize]))
+			common.Must1(record.Write(hmacWrite.Sum(nil)[:hmacSize]))
+			common.Must1(record.Write(frame[tlsHeaderSize:]))
 			frameBuffer.Release()
+			err = writer.WriteBuffer(record)
 			if err != nil {
 				return E.Cause(err, "write modified server frame")
 			}
