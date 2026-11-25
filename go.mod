@@ -1,6 +1,6 @@
 module github.com/sagernet/sing-shadowtls
 
-go 1.20
+go 1.24.0
 
 require (
 	github.com/metacubex/utls v1.7.0-alpha.2

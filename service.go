@@ -148,16 +148,17 @@ func (s *Service) NewConnection(ctx context.Context, conn net.Conn, source M.Soc
 		go bufio.Copy(hashConn, handshakeConn)
 		var request *buf.Buffer
 		request, err = copyUntilHandshakeFinishedV2(ctx, s.logger, handshakeConn, bufio.NewCachedConn(conn, clientHelloFrame), hashConn, 2)
-		if err == nil {
+		switch err {
+		case nil:
 			s.logger.TraceContext(ctx, "handshake finished")
 			handshakeConn.Close()
 			s.handler.NewConnectionEx(ctx, bufio.NewCachedConn(newConn(conn), request), source, destination, onClose)
 			return nil
-		} else if err == os.ErrPermission {
+		case os.ErrPermission:
 			s.logger.WarnContext(ctx, "fallback connection")
 			hashConn.Fallback()
 			return common.Error(bufio.Copy(handshakeConn, conn))
-		} else {
+		default:
 			return err
 		}
 	case 3:
